@@ -26,5 +26,8 @@
     <ClInclude Include="..\Logger\Logger.hpp">
       <Filter>Logger</Filter>
     </ClInclude>
+    <ClInclude Include="..\Logger\DirectX_Logger.hpp">
+      <Filter>Logger</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
