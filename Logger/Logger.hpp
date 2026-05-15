@@ -7,6 +7,16 @@
 #include <memory>
 #include <condition_variable>
 
+#define LOG_INFO(msg,detail) \
+    Logger::LoggerCore::Instance().LogPush(Logger::CreateLogEntry(Logger::Level::info, (msg), __FILE__, __FUNCTION__, __LINE__, detail))
+
+#define LOG_WARNING(msg,detail) \
+    Logger::LoggerCore::Instance().LogPush(Logger::CreateLogEntry(Logger::Level::warning, (msg), __FILE__, __FUNCTION__, __LINE__,detail))
+
+#define LOG_ERROR(msg) \
+    Logger::LoggerCore::Instance().LogPush(Logger::CreateLogEntry(Logger::Level::error, (msg), __FILE__, __FUNCTION__, __LINE__, true))
+
+
 //@brief	| 自作ログ名前空間 |
 namespace Logger {
 
@@ -45,45 +55,63 @@ namespace Logger {
 
 		Level level;
 		std::string message;
-		std::string_view file;
-		std::string_view function;
+		std::string file;
+		std::string function;
 		int line;
 		bool use_detail;
-	};
-
-	[[nodiscard]] std::string ToString(const char* c) {
-		return c ? std::string(c) : std::string{"null"};
-	}
-
-	//	自作ToString関数チェック
-	template<typename T>
-	concept HasToString = requires(T value) {
-		{ ToString(value) } -> std::convertible_to<std::string>;
-	};
-
-	//　std::to_string関数チェック
-	template<typename T>
-	concept HasStdToString = requires(T value) {
-		{ std::to_string(value) } -> std::convertible_to<std::string>;
 	};
 
 	template<class>
 	inline constexpr bool always_false = false;
 
-	//@brief	=== ログ変換関数 ===
-	//@return	変換された文字列
-	template<typename T>
-	[[nodiscard]] std::string ConvertToLogString(const T& value) {
-		if constexpr (HasToString<T>) {
-			return ToString(value);
-		}
-		else if constexpr (HasStdToString<T>) {
-			return std::to_string(value);
-		}
-		else {
-			static_assert(always_false<T>, "ConvertToLogString failed");
+	// ---------- traits 本体 ----------
+	template<typename T, typename = void>
+	struct LogStringTraits {
+		static std::string Convert(const T& value) {
+			if constexpr (requires(const T & v) {
+				{ ToString(v) } -> std::convertible_to<std::string>;
+			}) {
+				return ToString(value);
+			}
+			else if constexpr (requires(const T & v) {
+				{ std::to_string(v) } -> std::convertible_to<std::string>;
+			}) {
+				return std::to_string(value);
+			}
+			else {
+				static_assert(always_false<T>, "ConvertToLogString failed");
+			}
 		}
 	};
+
+	// std::string はそのまま返す
+	template<>
+	struct LogStringTraits<std::string, void> {
+		static std::string Convert(const std::string& value) {
+			return value;
+		}
+	};
+
+	// const char* も個別対応
+	template<>
+	struct LogStringTraits<const char*, void> {
+		static std::string Convert(const char* value) {
+			return value ? std::string(value) : std::string{ "null" };
+		}
+	};
+
+	template<>
+	struct LogStringTraits<char*, void> {
+		static std::string Convert(const char* value) {
+			return value ? std::string(value) : std::string{ "null" };
+		}
+	};
+
+	template<typename T>
+	[[nodiscard]] std::string ConvertToLogString(const T& value) {
+		using U = std::remove_cvref_t<T>;
+		return LogStringTraits<U>::Convert(value);
+	}
 
 	//@brief	=== ログ作成関数 ===
 	//@return	作成されたログ
@@ -91,7 +119,7 @@ namespace Logger {
 	[[nodiscard]] LogEntry CreateLogEntry(Level level, const T& value,
 		const char* file, const char* function, int line, bool detail = false) {
 
-		return LogEntry{ level,ConvertToLogString(value),file,function,line,detail };
+		return LogEntry{ level,ConvertToLogString(value),ToString(file),ToString(function),line,detail };
 	};
 
 	//@brief	/ === ログ一時保存キュークラス === /
@@ -117,17 +145,19 @@ namespace Logger {
 
 		//@brief	=== ログ取得関数 ===
 		//@return	キューの先頭ログ
-		[[nodiscard]] LogEntry PopQueue(bool is_running) {
-			
+		[[nodiscard]] LogEntry PopQueue(const std::atomic_bool& is_running) {
 			std::unique_lock lock(mutex_);
 
 			cv_.wait(lock, [&] {
-					return !log_queue_.empty() || !is_running;;
+				return !log_queue_.empty() || !is_running.load();
 				});
+
+			if (log_queue_.empty()) {
+				return {};
+			}
 
 			LogEntry log = std::move(log_queue_.front());
 			log_queue_.pop();
-
 			return log;
 		}
 
@@ -144,14 +174,18 @@ namespace Logger {
 		virtual void Output(const LogEntry& log) = 0;
 	};
 
+
+	template<typename T>
+	concept DerivedFromOutputBase = std::is_base_of_v<OutputBase, T>;
+
 	//@brief	/ === ログ中心クラス === /
-	class Logger final
+	class LoggerCore final
 	{
 		LogQueue queue_{};
 		std::thread log_thread_{};
 		std::unique_ptr<OutputBase> output_{};
 
-		std::atomic_bool is_running = true;
+		std::atomic_bool is_running = false;
 
 		void ThreadLoop() {
 			while (true) {
@@ -161,26 +195,38 @@ namespace Logger {
 					break;
 				}
 					
-				if (output_) {
+				if (output_ && !log.message.empty()) {
 					output_->Output(log);
 				}
 			}
 		}
 	public:
-		Logger(std::unique_ptr<OutputBase> output) : output_(std::move(output)) {
-			log_thread_ = std::thread([this] {ThreadLoop(); 
-				});
+		static LoggerCore& Instance() {
+			static LoggerCore ins;
+			return ins;
 		}
-		~Logger() {
+
+		LoggerCore() = default;
+		~LoggerCore() {
 			is_running = false;
 			queue_.AllNotify();
 			if (log_thread_.joinable()){
 				log_thread_.join();
 			}
 		}
+		
+		template<DerivedFromOutputBase T>
+		void Initalize() {
+			auto output = std::make_unique<T>();
+			output_ = std::move(output);
+			is_running = true;
+			log_thread_ = std::thread([this] {ThreadLoop();});
+		}
 
-		void LogPush(LogEntry log) {
-			queue_.PushQueue(std::move(log));
+		void LogPush(const LogEntry& log) {
+			if (is_running) {
+				queue_.PushQueue(log);
+			}	
 		}
 	};
 };

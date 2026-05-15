@@ -1,20 +1,55 @@
 #pragma once
+//-------- anoter hpp
 #include"Logger.hpp"
 #include<Windows.h>
 #include<sstream>
 
-#define LOG_INFO(logger, msg) \
-    (logger).LogPush(Logger::CreateLogEntry(Logger::Level::info, (msg), __FILE__, __FUNCTION__, __LINE__))
-
-#define LOG_WARNING(logger, msg) \
-    (logger).LogPush(Logger::CreateLogEntry(Logger::Level::warning, (msg), __FILE__, __FUNCTION__, __LINE__))
-
-#define LOG_ERROR(logger, msg) \
-    (logger).LogPush(Logger::CreateLogEntry(Logger::Level::error, (msg), __FILE__, __FUNCTION__, __LINE__))
-
-
-
 namespace Logger {
+
+	// HRESULT 専用ラッパー
+	struct HResultValue {
+		HRESULT value;
+	};
+
+	// 作りやすくする補助関数
+	[[nodiscard]] inline HResultValue AsHResult(HRESULT hr) {
+		return HResultValue{ hr };
+	}
+
+	// HResultValue 専用の traits specialization
+	template<>
+	struct LogStringTraits<HResultValue, void> {
+		static std::string Convert(const HResultValue& hrValue) {
+			HRESULT hr = hrValue.value;
+
+			char* msgBuf = nullptr;
+			FormatMessageA(
+				FORMAT_MESSAGE_ALLOCATE_BUFFER |
+				FORMAT_MESSAGE_FROM_SYSTEM |
+				FORMAT_MESSAGE_IGNORE_INSERTS,
+				nullptr,
+				static_cast<DWORD>(hr),
+				MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+				reinterpret_cast<LPSTR>(&msgBuf),
+				0,
+				nullptr
+			);
+
+			std::ostringstream oss;
+			oss << "hr = 0x"
+				<< std::hex << std::uppercase
+				<< static_cast<unsigned long>(hr)
+				<< std::dec
+				<< " : "
+				<< (msgBuf ? msgBuf : "Unknown error");
+
+			if (msgBuf) {
+				LocalFree(msgBuf);
+			}
+
+			return oss.str();
+		}
+	};
 
 	class OutputDebugWindow final :public OutputBase {
 
@@ -39,31 +74,9 @@ namespace Logger {
 			if (log.level == Level::error) {
 				oss << "========================================\n";
 			}
-			std::wstring wstr(oss.str().begin(), oss.str().end());
+			std::string s = oss.str();
+			std::wstring wstr(s.begin(), s.end());
 			Print_Log(wstr.c_str());
 		}
 	};
-
-	[[nodiscard]] std::string ToString(HRESULT hr) {
-		char* msgBuf = nullptr;
-		FormatMessageA(
-			FORMAT_MESSAGE_ALLOCATE_BUFFER |
-			FORMAT_MESSAGE_FROM_SYSTEM |
-			FORMAT_MESSAGE_IGNORE_INSERTS,
-			NULL,
-			hr,
-			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			(LPSTR)&msgBuf,
-			0,
-			NULL
-		);
-		std::ostringstream oss;
-		oss << "hr = " << hr << " : " << (msgBuf ? msgBuf : "Unknown error");
-
-		if (msgBuf) {
-			LocalFree(msgBuf);
-		}
-
-		return oss.str();
-	}
 }
